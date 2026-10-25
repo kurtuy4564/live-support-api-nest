@@ -1,13 +1,164 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client"
-  output   = "../generated/prisma"
+  output   = "../src/generated/prisma"
 }
 
 datasource db {
   provider = "postgresql"
+}
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+enum UserRole {
+  CLIENT
+  OPERATOR
+  ADMIN
+}
+
+enum TicketStatus {
+  NEW
+  ASSIGNED
+  IN_PROGRESS
+  CLOSED
+}
+
+enum TicketPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+// ==========================================
+// USER
+// ==========================================
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique @db.VarChar(255)
+  name         String   @db.VarChar(100)
+  passwordHash String   @map("password_hash")
+  role         UserRole @default(CLIENT)
+
+  avatarUrl  String?   @map("avatar_url")
+  isBlocked  Boolean   @default(false) @map("is_blocked")
+  lastSeenAt DateTime? @map("last_seen_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  sessions        Session[]
+  createdTickets  Ticket[]  @relation("ClientTickets")
+  assignedTickets Ticket[]  @relation("OperatorTickets")
+  closedTickets   Ticket[]  @relation("ClosedByUser")
+  messages        Message[]
+
+  @@index([role, isBlocked])
+  @@map("users")
+}
+
+// ==========================================
+// SESSION
+// ==========================================
+
+model Session {
+  id               String @id @default(uuid()) @db.Uuid
+  userId           String @map("user_id") @db.Uuid
+  refreshTokenHash String @unique @map("refresh_token_hash")
+
+  userAgent String? @map("user_agent")
+  ipAddress String? @map("ip_address") @db.VarChar(45)
+
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ==========================================
+// TICKET
+// ==========================================
+
+model Ticket {
+  id      String @id @default(uuid()) @db.Uuid
+  number  Int    @unique @default(autoincrement())
+  subject String @db.VarChar(200)
+
+  status   TicketStatus   @default(NEW)
+  priority TicketPriority @default(NORMAL)
+
+  clientId   String  @map("client_id") @db.Uuid
+  operatorId String? @map("operator_id") @db.Uuid
+  closedById String? @map("closed_by_id") @db.Uuid
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  takenAt   DateTime? @map("taken_at")
+  closedAt  DateTime? @map("closed_at")
+
+  closeReason String? @map("close_reason") @db.VarChar(500)
+
+  client User @relation("ClientTickets", fields: [clientId], references: [id], onDelete: Restrict)
+
+  operator User? @relation("OperatorTickets", fields: [operatorId], references: [id], onDelete: Restrict)
+
+  closedBy User? @relation("ClosedByUser", fields: [closedById], references: [id], onDelete: Restrict)
+
+  messages Message[]
+  rating   TicketRating?
+
+  @@index([status, createdAt])
+  @@index([operatorId, status])
+  @@index([clientId, createdAt])
+  @@index([updatedAt])
+  @@map("tickets")
+}
+
+// ==========================================
+// MESSAGE
+// ==========================================
+
+model Message {
+  id       String @id @default(uuid()) @db.Uuid
+  ticketId String @map("ticket_id") @db.Uuid
+  senderId String @map("sender_id") @db.Uuid
+
+  body String @db.VarChar(4000)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  sender User @relation(fields: [senderId], references: [id], onDelete: Restrict)
+
+  @@index([ticketId, createdAt, id])
+  @@index([senderId])
+  @@map("messages")
+}
+
+// ==========================================
+// TICKET RATING
+// ==========================================
+
+model TicketRating {
+  id       String @id @default(uuid()) @db.Uuid
+  ticketId String @unique @map("ticket_id") @db.Uuid
+
+  score   Int
+  comment String? @db.VarChar(1000)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@map("ticket_ratings")
 }
