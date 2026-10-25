@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -106,6 +107,8 @@ export class AuthService {
         id: true,
         email: true,
         passwordHash: true,
+        name: true,
+        role: true,
       },
     });
 
@@ -124,21 +127,114 @@ export class AuthService {
       throw new UnauthorizedException('Неверный email или пароль');
     }
 
-    // 4. Создаём JWT
-    const access_token = await this.jwtService.signAsync({
+    const refreshToken = randomBytes(32).toString('hex');
+    const refreshTokenHash = createHash('sha256')
+      .update(refreshToken)
+      .digest('hex');
+
+    await this.prisma.session.create({
+      data: {
+        userId: user.id,
+        refreshTokenHash,
+        expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+      },
+    });
+
+    // 4. Создаём access-токен
+    const accessToken = await this.jwtService.signAsync({
       sub: user.id,
       email: user.email,
     });
 
-    // 5. Возвращаем токен
-    return { access_token };
+    // 5. Возвращаем данные пользователя и refresh-токен для cookie
+    return {
+      accessToken,
+      refreshToken,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+      },
+    };
   }
 
-  async refresh() {
-    //TODO
+  async refresh(refreshToken: string) {
+    const refreshTokenHash = createHash('sha256')
+      .update(refreshToken)
+      .digest('hex');
+    const now = new Date();
+    const session = await this.prisma.session.findUnique({
+      where: { refreshTokenHash },
+      select: {
+        id: true,
+        userId: true,
+        revokedAt: true,
+        expiresAt: true,
+        user: {
+          select: {
+            email: true,
+            isBlocked: true,
+          },
+        },
+      },
+    });
+
+    if (
+      !session ||
+      session.revokedAt ||
+      session.expiresAt <= now
+    ) {
+      throw new UnauthorizedException('Недействительный или истёкший refresh-токен');
+    }
+
+    if (session.user.isBlocked) {
+      throw new ForbiddenException('Пользователь заблокирован');
+    }
+
+    const nextRefreshToken = randomBytes(32).toString('hex');
+    const nextRefreshTokenHash = createHash('sha256')
+      .update(nextRefreshToken)
+      .digest('hex');
+    const accessToken = await this.jwtService.signAsync({
+      sub: session.userId,
+      email: session.user.email,
+    });
+
+    const rotation = await this.prisma.session.updateMany({
+      where: {
+        id: session.id,
+        refreshTokenHash,
+        revokedAt: null,
+        expiresAt: { gt: now },
+      },
+      data: {
+        refreshTokenHash: nextRefreshTokenHash,
+        expiresAt: new Date(now.getTime() + REFRESH_TOKEN_TTL_MS),
+      },
+    });
+
+    if (rotation.count !== 1) {
+      throw new UnauthorizedException('Недействительный или истёкший refresh-токен');
+    }
+
+    return { accessToken, refreshToken: nextRefreshToken };
   }
 
-  async logout() {
-    //TODO
+  async logout(userId: string, refreshToken?: string) {
+    if (!refreshToken) {
+      return;
+    }
+
+    const refreshTokenHash = createHash('sha256')
+      .update(refreshToken)
+      .digest('hex');
+
+    await this.prisma.session.deleteMany({
+      where: {
+        userId,
+        refreshTokenHash,
+      },
+    });
   }
 }

@@ -3,7 +3,7 @@ import { createParamDecorator, ExecutionContext } from '@nestjs/common';
 import type { Request } from 'express';
 
 type JwtPayload = {
-  sub: number;
+  sub: string;
   email: string;
 };
 

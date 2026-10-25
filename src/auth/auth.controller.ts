@@ -4,13 +4,23 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Req,
   Res,
+  UseGuards,
+  UnauthorizedException,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 
 import { AuthService, REFRESH_TOKEN_TTL_MS } from './auth.service.js';
+import { CurrentUser } from './decorators/current-user.decorator.js';
 import { RegisterDto } from './dto/register.dto.js';
 import { LoginDto } from './dto/login.dto.js';
+import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
+
+type AuthenticatedUser = {
+  sub: string;
+  email: string;
+};
 
 @Controller('auth')
 export class AuthController {
@@ -36,17 +46,71 @@ export class AuthController {
   }
 
   @Post('login')
-  login(@Body() dto: LoginDto) {
-    return this.authService.login(dto);
+  @HttpCode(HttpStatus.OK)
+  async login(
+    @Body() dto: LoginDto,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const { refreshToken, ...result } = await this.authService.login(dto);
+
+    response.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path: '/auth',
+      maxAge: REFRESH_TOKEN_TTL_MS,
+    });
+
+    return result;
   }
 
   @Post('refresh')
-  refresh() {
-    return this.authService.refresh();
+  @HttpCode(HttpStatus.OK)
+  async refresh(
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const refreshToken = request.cookies?.refreshToken;
+
+    if (typeof refreshToken !== 'string' || refreshToken.length === 0) {
+      throw new UnauthorizedException('Требуется refresh-токен');
+    }
+
+    const result = await this.authService.refresh(refreshToken);
+
+    response.cookie('refreshToken', result.refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path: '/auth',
+      maxAge: REFRESH_TOKEN_TTL_MS,
+    });
+
+    return { accessToken: result.accessToken };
   }
 
   @Post('logout')
-  logout() {
-    return this.authService.logout();
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(JwtAuthGuard)
+  async logout(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const refreshToken = request.cookies?.refreshToken;
+
+    await this.authService.logout(
+      user.sub,
+      typeof refreshToken === 'string' ? refreshToken : undefined,
+    );
+
+    response.clearCookie('refreshToken', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path: '/auth',
+    });
+
+    return { message: 'Выход выполнен' };
   }
 }
