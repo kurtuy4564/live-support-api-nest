@@ -8,7 +8,10 @@ describe('JwtAuthGuard', () => {
     const jwtService = new JwtService({ secret: 'test-secret' });
     const verifyAsync = vi
       .spyOn(jwtService, 'verifyAsync')
-      .mockResolvedValue({ sub: 1, email: 'user@example.com' });
+      .mockResolvedValue({
+        sub: 'd2134830-99da-4987-b4a9-59fb375b63c6',
+        email: 'user@example.com',
+      });
     const guard = new JwtAuthGuard(jwtService);
     const request = {
       headers: { authorization: 'bearer   test-token  ' },

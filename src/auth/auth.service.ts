@@ -4,12 +4,15 @@ import {
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
+import { createHash, randomBytes } from 'node:crypto';
 import * as bcrypt from 'bcrypt';
 import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { JwtService } from '@nestjs/jwt';
 import { RegisterDto } from './dto/register.dto.js';
 import { LoginDto } from './dto/login.dto.js';
+
+export const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class AuthService {
@@ -20,6 +23,11 @@ export class AuthService {
 
   async register(dto: RegisterDto) {
     const email = dto.email.trim().toLowerCase();
+    const refreshToken = randomBytes(32).toString('hex');
+    const refreshTokenHash = createHash('sha256')
+      .update(refreshToken)
+      .digest('hex');
+    const refreshExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
 
     // bcrypt ограничивает пароль 72 байтами
     if (Buffer.byteLength(dto.password, 'utf8') > 72) {
@@ -38,23 +46,41 @@ export class AuthService {
     // 2. Хешируем пароль
     const passwordHash = await bcrypt.hash(dto.password, 12);
 
-    // 3. Сохраняем пользователя
+    // 3. Создаем пользователя и сессию атомарно
     try {
-      const user = await this.prisma.user.create({
-        data: {
-          email,
-          passwordHash,
-          name: dto.name,
-        },
-        select: {
-          id: true,
-          email: true,
-          name: true,
-          role: true,
-        },
+      const user = await this.prisma.$transaction(async (transaction) => {
+        const createdUser = await transaction.user.create({
+          data: {
+            email,
+            passwordHash,
+            name: dto.name,
+            role: 'CLIENT',
+          },
+          select: {
+            id: true,
+            email: true,
+            name: true,
+            role: true,
+          },
+        });
+
+        await transaction.session.create({
+          data: {
+            userId: createdUser.id,
+            refreshTokenHash,
+            expiresAt: refreshExpiresAt,
+          },
+        });
+
+        return createdUser;
       });
 
-      return user;
+      const accessToken = await this.jwtService.signAsync({
+        sub: user.id,
+        email: user.email,
+      });
+
+      return { accessToken, refreshToken, user };
     } catch (error) {
       // Защита от двух одновременных регистраций
       if (
@@ -109,6 +135,10 @@ export class AuthService {
   }
 
   async refresh() {
+    //TODO
+  }
+
+  async logout() {
     //TODO
   }
 }

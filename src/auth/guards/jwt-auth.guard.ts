@@ -8,7 +8,7 @@ import { JwtService } from '@nestjs/jwt';
 import type { Request } from 'express';
 
 type JwtPayload = {
-  sub: number;
+  sub: string;
   email: string;
 };
 
@@ -33,8 +33,7 @@ export class JwtAuthGuard implements CanActivate {
     try {
       const payload = await this.jwtService.verifyAsync<JwtPayload>(token);
       if (
-        typeof payload.sub !== 'number' ||
-        !Number.isInteger(payload.sub) ||
+        typeof payload.sub !== 'string' ||
         typeof payload.email !== 'string'
       ) {
         throw new UnauthorizedException('Недействительный токен');

@@ -1,6 +1,14 @@
-import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Res,
+} from '@nestjs/common';
+import type { Response } from 'express';
 
-import { AuthService } from './auth.service.js';
+import { AuthService, REFRESH_TOKEN_TTL_MS } from './auth.service.js';
 import { RegisterDto } from './dto/register.dto.js';
 import { LoginDto } from './dto/login.dto.js';
 
@@ -8,10 +16,23 @@ import { LoginDto } from './dto/login.dto.js';
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
-  @Post('register') // Client
+  @Post('register')
   @HttpCode(HttpStatus.CREATED)
-  register(@Body() dto: RegisterDto) {
-    return this.authService.register(dto);
+  async register(
+    @Body() dto: RegisterDto,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const { refreshToken, ...result } = await this.authService.register(dto);
+
+    response.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path: '/auth',
+      maxAge: REFRESH_TOKEN_TTL_MS,
+    });
+
+    return result;
   }
 
   @Post('login')
@@ -22,5 +43,10 @@ export class AuthController {
   @Post('refresh')
   refresh() {
     return this.authService.refresh();
+  }
+
+  @Post('logout')
+  logout() {
+    return this.authService.logout();
   }
 }
