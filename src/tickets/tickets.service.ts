@@ -8,7 +8,7 @@ import { Prisma } from '../generated/prisma/client.js';
 export class TicketsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async getTickets(dto: СreateTicketDto, userId: string) {
+  async createTickets(dto: СreateTicketDto, userId: string) {
     return this.prisma.ticket.create({
       data: {
         ...dto,

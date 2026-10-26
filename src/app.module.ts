@@ -7,6 +7,7 @@ import { AppService } from './app.service.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { UsersModule } from './users/users.module.js';
 import { TicketsModule } from './tickets/tickets.module.js';
+import { RealtimeModule } from './realtime/realtime.module.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -24,6 +25,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     }),
     UsersModule,
     TicketsModule,
+    RealtimeModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -16,11 +16,11 @@ export class TicketsController {
 
   @Post()
   @UseGuards(JwtAuthGuard)
-  getTickets(
+  createTickets(
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: СreateTicketDto,
   ) {
-    return this.ticketsService.getTickets(dto, user.sub);
+    return this.ticketsService.createTickets(dto, user.sub);
   }
 
   @Get()
