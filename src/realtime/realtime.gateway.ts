@@ -8,7 +8,7 @@ import {
   WebSocketServer,
   WsException,
 } from '@nestjs/websockets';
-import { Logger, UsePipes, ValidationPipe } from '@nestjs/common';
+import { ConflictException, ForbiddenException, HttpException, Logger, NotFoundException, UsePipes, ValidationPipe } from '@nestjs/common';
 import type { Server } from 'socket.io';
 
 import type {
@@ -18,6 +18,8 @@ import type {
 import { TicketsService } from '../tickets/tickets.service.js';
 import { TicketRoomDto } from './dto/ticket-room.dto.js';
 import { RealtimeAuthService } from './realtime-auth.service.js';
+import { MessagesService } from '../messages/messages.service.js';
+import { SendMessageDto } from './dto/send-message.dto.js';
 
 @WebSocketGateway()
 export class RealtimeGateway
@@ -31,6 +33,7 @@ export class RealtimeGateway
   constructor(
     private readonly ticketsService: TicketsService,
     private readonly realtimeAuthService: RealtimeAuthService,
+    private readonly messagesService: MessagesService,
   ) {}
 
   afterInit(server: Server) {
@@ -143,5 +146,236 @@ export class RealtimeGateway
     client.emit('ticket:left', {
       ticketId: dto.ticketId,
     });
+  }
+
+  @SubscribeMessage('message:send')
+  @UsePipes(
+    new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      exceptionFactory: () =>
+        new WsException({
+          code: 'VALIDATION_ERROR',
+          message: 'Некорректные данные сообщения',
+        }),
+    }),
+  )
+  async handleSendMessage(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() dto: SendMessageDto,
+  ) {
+    const user = client.data.user;
+
+    if (!user) {
+      throw new WsException({
+        code: 'UNAUTHORIZED',
+        message: 'Пользователь не авторизован',
+      });
+    }
+
+    // Проверяем, что сокет действительно находится в комнате
+    const room = `ticket:${dto.ticketId}`;
+
+    if (!client.rooms.has(room)) {
+      throw new WsException({
+        code: 'NOT_IN_ROOM',
+        message: 'Сначала подключитесь к комнате тикета',
+      });
+    }
+
+    let message;
+
+    try {
+      message = await this.messagesService.sendMessage(
+        dto.ticketId,
+        dto.body,
+        user,
+      );
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw new WsException({
+          code: 'MESSAGE_REJECTED',
+          message: error.message,
+        });
+      }
+
+      throw error;
+    }
+
+    this.server.to(room).emit('message:new', message);
+
+    return {
+      event: 'message:sent',
+      data: { id: message.id },
+    };
+  }
+
+  @SubscribeMessage('ticket:take')
+  @UsePipes(
+    new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      exceptionFactory: () =>
+        new WsException({
+          code: 'VALIDATION_ERROR',
+          message: 'Некорректный ticketId',
+        }),
+    }),
+  )
+  async handleTicketTake(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() dto: TicketRoomDto,
+  ) {
+    const user = client.data.user;
+
+    if (!user) {
+      throw new WsException({
+        code: 'UNAUTHORIZED',
+        message: 'Пользователь не авторизован',
+      });
+    }
+
+    let ticket;
+
+    try {
+      ticket = await this.ticketsService.takeTicket(
+        dto.ticketId,
+        user.sub,
+        user.role,
+      );
+    } catch (error) {
+      if (error instanceof ForbiddenException) {
+        throw new WsException({
+          code: 'FORBIDDEN',
+          message: error.message,
+        });
+      }
+
+      if (error instanceof NotFoundException) {
+        throw new WsException({
+          code: 'NOT_FOUND',
+          message: error.message,
+        });
+      }
+
+      if (error instanceof ConflictException) {
+        throw new WsException({
+          code: 'ALREADY_TAKEN',
+          message: 'Тикет уже занят или недоступен',
+        });
+      }
+
+      throw error;
+    }
+
+    // Подключаем оператора к комнате тикета
+    await client.join(`ticket:${ticket.id}`);
+
+    const payload = {
+      ticketId: ticket.id,
+      operatorId: user.sub,
+      status: ticket.status,
+      takenAt: ticket.takenAt,
+    };
+
+    // Обновляем очередь у всех операторов
+    this.server.to('operators').emit('ticket:taken', payload);
+
+    // Уведомляем клиента
+    this.server.to(`user:${ticket.clientId}`).emit('ticket:taken', payload);
+
+    return {
+      event: 'ticket:take:success',
+      data: payload,
+    };
+  }
+
+  @SubscribeMessage('ticket:close')
+  @UsePipes(
+    new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      exceptionFactory: () =>
+        new WsException({
+          code: 'VALIDATION_ERROR',
+          message: 'Некорректный ticketId',
+        }),
+    }),
+  )
+  async handleTicketClose(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() dto: TicketRoomDto,
+  ) {
+    const user = client.data.user;
+
+    if (!user) {
+      throw new WsException({
+        code: 'UNAUTHORIZED',
+        message: 'Пользователь не авторизован',
+      });
+    }
+
+    let ticket;
+
+    try {
+      ticket = await this.ticketsService.closeTicket(
+        dto.ticketId,
+        user.sub,
+        user.role,
+      );
+    } catch (error) {
+      if (error instanceof ForbiddenException) {
+        throw new WsException({
+          code: 'FORBIDDEN',
+          message: error.message,
+        });
+      }
+
+      if (error instanceof NotFoundException) {
+        throw new WsException({
+          code: 'NOT_FOUND',
+          message: error.message,
+        });
+      }
+
+      if (error instanceof ConflictException) {
+        throw new WsException({
+          code: 'ALREADY_CLOSED',
+          message: error.message,
+        });
+      }
+
+      throw error;
+    }
+
+    const payload = {
+      ticketId: ticket.id,
+      status: ticket.status,
+      closedAt: ticket.closedAt,
+      closedById: ticket.closedById,
+    };
+
+    // Участники, находящиеся в комнате тикета
+    this.server.to(`ticket:${ticket.id}`).emit('ticket:closed', payload);
+
+    // Операторы, отслеживающие очередь
+    this.server.to('operators').emit('ticket:closed', payload);
+
+    // Клиент, даже если он не открыл чат
+    this.server.to(`user:${ticket.clientId}`).emit('ticket:closed', payload);
+
+    // Назначенный оператор, даже если он не открыл чат
+    if (ticket.operatorId) {
+      this.server
+        .to(`user:${ticket.operatorId}`)
+        .emit('ticket:closed', payload);
+    }
+
+    return {
+      event: 'ticket:close:success',
+      data: payload,
+    };
   }
 }
