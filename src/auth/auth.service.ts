@@ -79,6 +79,7 @@ export class AuthService {
       const accessToken = await this.jwtService.signAsync({
         sub: user.id,
         email: user.email,
+        role: user.role,
       });
 
       return { accessToken, refreshToken, user };
@@ -109,12 +110,16 @@ export class AuthService {
         passwordHash: true,
         name: true,
         role: true,
+        isBlocked: true,
       },
     });
 
     // 2. Проверяем, существует ли пользователь
     if (!user) {
       throw new UnauthorizedException('Неверный email или пароль');
+    }
+    if (user.isBlocked) {
+      throw new ForbiddenException('Пользователь заблокирован');
     }
 
     // 3. Сравниваем пароль с хешем
@@ -144,6 +149,7 @@ export class AuthService {
     const accessToken = await this.jwtService.signAsync({
       sub: user.id,
       email: user.email,
+      role: user.role,
     });
 
     // 5. Возвращаем данные пользователя и refresh-токен для cookie
@@ -174,6 +180,7 @@ export class AuthService {
         user: {
           select: {
             email: true,
+            role: true,
             isBlocked: true,
           },
         },
@@ -199,6 +206,7 @@ export class AuthService {
     const accessToken = await this.jwtService.signAsync({
       sub: session.userId,
       email: session.user.email,
+      role: session.user.role,
     });
 
     const rotation = await this.prisma.session.updateMany({

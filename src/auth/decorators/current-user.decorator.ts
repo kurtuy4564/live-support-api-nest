@@ -5,6 +5,7 @@ import type { Request } from 'express';
 type JwtPayload = {
   sub: string;
   email: string;
+  role?: 'CLIENT' | 'OPERATOR' | 'ADMIN';
 };
 
 type AuthenticatedRequest = Request & {

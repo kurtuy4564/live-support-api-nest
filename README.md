@@ -25,6 +25,28 @@
 
 [Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
 
+## Live support MVP
+
+The API provides JWT authentication with refresh-token cookies, client ticket
+creation, operator assignment, ticket messages over Socket.IO, ticket history,
+closing and ratings. Set `DATABASE_URL` and `JWT_SECRET`, apply the Prisma
+migrations, then run `npm run start:dev`.
+
+REST endpoints include:
+
+- `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh`,
+  `POST /auth/logout`, and `GET /users/me`
+- `POST /tickets`, `GET /tickets`, `GET /tickets/:id`,
+  `PATCH /tickets/:id/close`, `POST /tickets/:id/rating`, and
+  `GET /tickets/:id/messages`
+- `GET /support/stats`, `GET /admin/users`, and
+  `PATCH /admin/users/:id/block`
+
+Connect Socket.IO with the access token in `auth.token`. Join a conversation
+with `ticket:join`; use `message:send`, `typing:start`/`typing:stop`,
+`ticket:take`, and `ticket:close`. Queue, presence, message, and ticket
+changes are broadcast through their corresponding events.
+
 ## Project setup
 
 ```bash

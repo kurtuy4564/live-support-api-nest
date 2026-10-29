@@ -90,7 +90,7 @@ export class AuthController {
   }
 
   @Post('logout')
-  @HttpCode(HttpStatus.OK)
+  @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(JwtAuthGuard)
   async logout(
     @CurrentUser() user: AuthenticatedUser,
@@ -111,6 +111,5 @@ export class AuthController {
       path: '/auth',
     });
 
-    return { message: 'Выход выполнен' };
   }
 }

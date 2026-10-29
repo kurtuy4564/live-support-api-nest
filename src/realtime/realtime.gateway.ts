@@ -14,6 +14,7 @@ import {
   HttpException,
   Logger,
   NotFoundException,
+  UseFilters,
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
@@ -21,15 +22,18 @@ import type { Server } from 'socket.io';
 
 import type {
   AuthenticatedSocket,
-  SocketUser,
 } from './interfaces/authenticated-socket.interface.js';
 import { TicketsService } from '../tickets/tickets.service.js';
 import { TicketRoomDto } from './dto/ticket-room.dto.js';
 import { RealtimeAuthService } from './realtime-auth.service.js';
 import { MessagesService } from '../messages/messages.service.js';
 import { SendMessageDto } from './dto/send-message.dto.js';
+import { PresenceService } from './presence/presence.service.js';
+import { RealtimeEventsService } from './realtime-events.service.js';
+import { RealtimeWsExceptionFilter } from './realtime-ws-exception.filter.js';
 
 @WebSocketGateway()
+@UseFilters(RealtimeWsExceptionFilter)
 export class RealtimeGateway
   implements OnGatewayConnection, OnGatewayDisconnect
 {
@@ -78,12 +82,15 @@ export class RealtimeGateway
   }
 
   constructor(
-    private readonly ticketsService: TicketsService,
     private readonly realtimeAuthService: RealtimeAuthService,
+    private readonly ticketsService: TicketsService,
     private readonly messagesService: MessagesService,
+    private readonly presenceService: PresenceService,
+    private readonly realtimeEvents: RealtimeEventsService,
   ) {}
 
   afterInit(server: Server) {
+    this.realtimeEvents.setServer(server);
     server.use(async (socket, next) => {
       try {
         const user = await this.realtimeAuthService.authenticate(
@@ -99,6 +106,19 @@ export class RealtimeGateway
     });
   }
 
+  private emitPresenceUpdate(
+    userId: string,
+    online: boolean,
+    ticketIds: string[],
+  ) {
+    const rooms = [
+      'operators',
+      'presence',
+      ...ticketIds.map((ticketId) => `ticket:${ticketId}`),
+    ];
+    this.realtimeEvents.emitRooms(rooms, 'presence:update', { userId, online });
+  }
+
   async handleConnection(client: AuthenticatedSocket) {
     const user = client.data.user;
 
@@ -108,15 +128,32 @@ export class RealtimeGateway
     }
 
     await client.join(`user:${user.sub}`);
+    await client.join('presence');
 
     if (user.role === 'OPERATOR' || user.role === 'ADMIN') {
       await client.join('operators');
     }
 
-    this.logger.log(`Подключился ${user.email}, роль: ${user.role}`);
+    const becameOnline = this.presenceService.addConnection(
+      user.sub,
+      client.id,
+      user.role,
+    );
+
+    if (becameOnline) {
+      const ticketIds = await this.ticketsService.getActiveTicketIdsForUser(
+        user.sub,
+      );
+      this.emitPresenceUpdate(user.sub, true, ticketIds);
+    }
+
+    this.logger.log(`Подключился пользователь: ${user.sub}`);
+    if (becameOnline) {
+      await this.emitQueueStats();
+    }
   }
 
-  handleDisconnect(client: AuthenticatedSocket) {
+  async handleDisconnect(client: AuthenticatedSocket) {
     for (const key of this.typingStates.keys()) {
       if (!key.startsWith(`${client.id}:`)) {
         continue;
@@ -126,7 +163,26 @@ export class RealtimeGateway
       this.stopTyping(client, ticketId);
     }
 
+    const user = client.data.user;
+    if (user) {
+      const becameOffline = this.presenceService.removeConnection(
+        user.sub,
+        client.id,
+      );
+      if (becameOffline) {
+        const ticketIds = await this.ticketsService.getActiveTicketIdsForUser(
+          user.sub,
+        );
+        this.emitPresenceUpdate(user.sub, false, ticketIds);
+        await this.emitQueueStats();
+      }
+    }
+
     this.logger.log(`Отключился сокет: ${client.id}`);
+  }
+
+  private async emitQueueStats() {
+    this.server.to('operators').emit('queue:stats', await this.ticketsService.getStats());
   }
 
   @UsePipes(
@@ -155,19 +211,54 @@ export class RealtimeGateway
     }
 
     try {
-      await this.ticketsService.checkTicketAccess(
-        dto.ticketId,
-        user.sub,
-        user.role,
-      );
-    } catch {
-      throw new WsException({
-        code: 'ACCESS_DENIED',
-        message: 'Тикет не найден или доступ запрещён',
-      });
+      try {
+        await this.ticketsService.checkTicketAccess(
+          dto.ticketId,
+          user.sub,
+          user.role,
+        );
+      } catch (error) {
+        if (
+          error instanceof ForbiddenException ||
+          error instanceof NotFoundException
+        ) {
+          throw new WsException({
+            code: 'ACCESS_DENIED',
+            message: 'Тикет не найден или доступ запрещён',
+          });
+        }
+        throw error;
+      }
+    } catch (error) {
+      if (
+        error instanceof ForbiddenException ||
+        error instanceof NotFoundException
+      ) {
+        throw new WsException({
+          code: 'ACCESS_DENIED',
+          message: 'Тикет не найден или доступ запрещён',
+        });
+      }
+      throw error;
     }
 
     await client.join(`ticket:${dto.ticketId}`);
+    const participants = await this.ticketsService.getTicketParticipants(
+      dto.ticketId,
+    );
+    if (participants) {
+      for (const participantId of [
+        participants.clientId,
+        participants.operatorId,
+      ]) {
+        if (participantId) {
+          this.server.to(`ticket:${dto.ticketId}`).emit('presence:update', {
+            userId: participantId,
+            online: this.presenceService.isOnline(participantId),
+          });
+        }
+      }
+    }
 
     client.emit('ticket:joined', {
       ticketId: dto.ticketId,
@@ -260,6 +351,7 @@ export class RealtimeGateway
     }
 
     this.server.to(room).emit('message:new', message);
+    this.stopTyping(client, dto.ticketId);
 
     return {
       event: 'message:sent',
@@ -328,22 +420,14 @@ export class RealtimeGateway
     // Подключаем оператора к комнате тикета
     await client.join(`ticket:${ticket.id}`);
 
-    const payload = {
-      ticketId: ticket.id,
-      operatorId: user.sub,
-      status: ticket.status,
-      takenAt: ticket.takenAt,
-    };
-
-    // Обновляем очередь у всех операторов
-    this.server.to('operators').emit('ticket:taken', payload);
-
-    // Уведомляем клиента
-    this.server.to(`user:${ticket.clientId}`).emit('ticket:taken', payload);
-
     return {
       event: 'ticket:take:success',
-      data: payload,
+      data: {
+        ticketId: ticket.id,
+        operatorId: user.sub,
+        status: ticket.status,
+        takenAt: ticket.takenAt,
+      },
     };
   }
 
@@ -406,32 +490,14 @@ export class RealtimeGateway
       throw error;
     }
 
-    const payload = {
-      ticketId: ticket.id,
-      status: ticket.status,
-      closedAt: ticket.closedAt,
-      closedById: ticket.closedById,
-    };
-
-    // Участники, находящиеся в комнате тикета
-    this.server.to(`ticket:${ticket.id}`).emit('ticket:closed', payload);
-
-    // Операторы, отслеживающие очередь
-    this.server.to('operators').emit('ticket:closed', payload);
-
-    // Клиент, даже если он не открыл чат
-    this.server.to(`user:${ticket.clientId}`).emit('ticket:closed', payload);
-
-    // Назначенный оператор, даже если он не открыл чат
-    if (ticket.operatorId) {
-      this.server
-        .to(`user:${ticket.operatorId}`)
-        .emit('ticket:closed', payload);
-    }
-
     return {
       event: 'ticket:close:success',
-      data: payload,
+      data: {
+        ticketId: ticket.id,
+        status: ticket.status,
+        closedAt: ticket.closedAt,
+        closedById: ticket.closedById,
+      },
     };
   }
 
@@ -530,4 +596,5 @@ export class RealtimeGateway
 
     this.stopTyping(client, dto.ticketId);
   }
+
 }
