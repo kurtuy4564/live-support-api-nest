@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { СreateTicketDto } from './dto/tickets.dto.js';
 import { GetTicketsQueryDto } from './dto/get-tickets-query.dto.js';
@@ -51,5 +51,38 @@ export class TicketsService {
         totalPages: Math.ceil(total / limit),
       },
     };
+  }
+
+  async checkTicketAccess(
+    ticketId: string,
+    userId: string,
+    role: 'CLIENT' | 'OPERATOR' | 'ADMIN',
+  ) {
+    const ticket = await this.prisma.ticket.findUnique({
+      where: { id: ticketId },
+      select: {
+        id: true,
+        clientId: true,
+        operatorId: true,
+      },
+    });
+
+    if (!ticket) {
+      throw new NotFoundException('Тикет не найден');
+    }
+
+    if (role === 'ADMIN') {
+      return;
+    }
+
+    if (role === 'CLIENT' && ticket.clientId === userId) {
+      return;
+    }
+
+    if (role === 'OPERATOR' && ticket.operatorId === userId) {
+      return;
+    }
+
+    throw new ForbiddenException('Нет доступа к тикету');
   }
 }

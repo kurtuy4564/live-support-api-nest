@@ -7,5 +7,6 @@ import { AuthModule } from '../auth/auth.module.js';
   imports: [AuthModule],
   controllers: [TicketsController],
   providers: [TicketsService],
+  exports: [TicketsService],
 })
 export class TicketsModule {}
