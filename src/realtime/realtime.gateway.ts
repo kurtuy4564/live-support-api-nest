@@ -8,7 +8,15 @@ import {
   WebSocketServer,
   WsException,
 } from '@nestjs/websockets';
-import { ConflictException, ForbiddenException, HttpException, Logger, NotFoundException, UsePipes, ValidationPipe } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  HttpException,
+  Logger,
+  NotFoundException,
+  UsePipes,
+  ValidationPipe,
+} from '@nestjs/common';
 import type { Server } from 'socket.io';
 
 import type {
@@ -29,6 +37,45 @@ export class RealtimeGateway
   server: Server;
 
   private readonly logger = new Logger(RealtimeGateway.name);
+
+  private readonly typingStates = new Map<
+    string,
+    {
+      timer: NodeJS.Timeout;
+      lastEmittedAt: number;
+    }
+  >();
+
+  private readonly TYPING_TIMEOUT_MS = 3000;
+  private readonly TYPING_THROTTLE_MS = 2000;
+
+  private getTypingKey(socketId: string, ticketId: string) {
+    return `${socketId}:${ticketId}`;
+  }
+
+  private stopTyping(client: AuthenticatedSocket, ticketId: string) {
+    const key = this.getTypingKey(client.id, ticketId);
+    const state = this.typingStates.get(key);
+
+    if (!state) {
+      return;
+    }
+
+    clearTimeout(state.timer);
+    this.typingStates.delete(key);
+
+    const user = client.data.user;
+
+    if (!user) {
+      return;
+    }
+
+    client.to(`ticket:${ticketId}`).emit('typing:update', {
+      ticketId,
+      userId: user.sub,
+      isTyping: false,
+    });
+  }
 
   constructor(
     private readonly ticketsService: TicketsService,
@@ -70,6 +117,15 @@ export class RealtimeGateway
   }
 
   handleDisconnect(client: AuthenticatedSocket) {
+    for (const key of this.typingStates.keys()) {
+      if (!key.startsWith(`${client.id}:`)) {
+        continue;
+      }
+
+      const ticketId = key.slice(client.id.length + 1);
+      this.stopTyping(client, ticketId);
+    }
+
     this.logger.log(`Отключился сокет: ${client.id}`);
   }
 
@@ -377,5 +433,101 @@ export class RealtimeGateway
       event: 'ticket:close:success',
       data: payload,
     };
+  }
+
+  @SubscribeMessage('typing:start')
+  @UsePipes(
+    new ValidationPipe({
+      whitelist: true,
+      transform: true,
+      exceptionFactory: () =>
+        new WsException({
+          code: 'VALIDATION_ERROR',
+          message: 'Некорректный ticketId',
+        }),
+    }),
+  )
+  async handleTypingStart(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() dto: TicketRoomDto,
+  ) {
+    const user = client.data.user;
+
+    if (!user) {
+      throw new WsException('UNAUTHORIZED');
+    }
+
+    const room = `ticket:${dto.ticketId}`;
+
+    if (!client.rooms.has(room)) {
+      throw new WsException('NOT_IN_ROOM');
+    }
+
+    // Проверяем актуальные права на тикет
+    await this.ticketsService.checkTicketAccess(
+      dto.ticketId,
+      user.sub,
+      user.role,
+    );
+
+    const key = this.getTypingKey(client.id, dto.ticketId);
+    const existing = this.typingStates.get(key);
+    const now = Date.now();
+
+    // Продлеваем срок действия индикатора
+    if (existing) {
+      clearTimeout(existing.timer);
+    }
+
+    const timer = setTimeout(() => {
+      this.stopTyping(client, dto.ticketId);
+    }, this.TYPING_TIMEOUT_MS);
+
+    this.typingStates.set(key, {
+      timer,
+      lastEmittedAt: existing?.lastEmittedAt ?? 0,
+    });
+
+    // Ограничиваем частоту отправки повторных событий
+    if (existing && now - existing.lastEmittedAt < this.TYPING_THROTTLE_MS) {
+      return;
+    }
+
+    this.typingStates.get(key)!.lastEmittedAt = now;
+
+    client.to(room).emit('typing:update', {
+      ticketId: dto.ticketId,
+      userId: user.sub,
+      isTyping: true,
+    });
+  }
+
+  @SubscribeMessage('typing:stop')
+  @UsePipes(
+    new ValidationPipe({
+      whitelist: true,
+      transform: true,
+      exceptionFactory: () =>
+        new WsException({
+          code: 'VALIDATION_ERROR',
+          message: 'Некорректный ticketId',
+        }),
+    }),
+  )
+  handleTypingStop(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() dto: TicketRoomDto,
+  ) {
+    if (!client.data.user) {
+      throw new WsException('UNAUTHORIZED');
+    }
+
+    const room = `ticket:${dto.ticketId}`;
+
+    if (!client.rooms.has(room)) {
+      throw new WsException('NOT_IN_ROOM');
+    }
+
+    this.stopTyping(client, dto.ticketId);
   }
 }
